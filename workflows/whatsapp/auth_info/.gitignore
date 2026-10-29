@@ -1,0 +1,3 @@
+# Ignore Baileys authentication credentials and tokens
+*
+!.gitignore

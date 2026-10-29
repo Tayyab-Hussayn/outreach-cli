@@ -1,0 +1,16 @@
+Assalam u Alaikum {Restaurant name},
+
+Main Tayyab Hussain, Lahore ke restaurants ke liye AI automation banata hoon.
+
+Rush hours mein WhatsApp par jo orders late reply ki wajah se miss ho jate hain, wo aksar Foodpanda par chale jate hain, aur wahan har order par commission kat-ti hai.
+
+Is ke liye maine ek WhatsApp AI Assistant banaya hai:
+
+1. Har customer ko instant reply, menu aur dish pictures ke saath
+2. Order khud leta hai, total calculate karta hai, aur customer se confirm karwata hai
+3. Confirmed order ki detail seedha kitchen ke WhatsApp par
+4. Confused customer ko restaurant ka call number de deta hai, taake wo direct baat kar sake
+
+Direct WhatsApp orders par koi commission nahi.
+
+1 minute ki demo video saath bhej raha hoon. Pasand aaye to "Demo" reply kar dein, main aap ke apne menu par live dikha dunga.

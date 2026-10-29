@@ -1,0 +1,63 @@
+# Outreach CLI Configuration Settings
+
+rate_limits:
+  whatsapp:
+    min_delay_seconds: 12
+    max_delay_seconds: 28
+    batch_size: 15
+    daily_limit: 50
+  mail:
+    min_delay_seconds: 5
+    max_delay_seconds: 15
+    batch_size: 20
+    daily_limit: 100
+
+safety:
+  typing_simulation:
+    enabled: true
+    ms_per_char: 35              # Mimic natural typing speed (~35ms per character)
+    min_duration_seconds: 2      # Minimum typing indicator time
+    max_duration_seconds: 6      # Maximum typing indicator time
+  batch_break:
+    enabled: true
+    interval_messages: 5         # Take a human rest break every X messages
+    min_rest_seconds: 60         # 1 minute minimum rest
+    max_rest_seconds: 120        # 2 minutes maximum rest
+  circuit_breaker:
+    enabled: true
+    max_consecutive_failures: 3  # Stop workflow if 3 consecutive failures occur to avoid session ban
+  anti_fingerprint:
+    spintax_enabled: true        # Parses {Hi|Hello|Hey} syntax in templates
+    zero_width_hash: true        # Injects subtle invisible zero-width spaces for unique message hashes
+    browser_preset: "macOS"      # Official macOS Desktop Baileys fingerprint
+    stealth_connect: true        # markOnlineOnConnect: false (avoids instant bot online flag)
+  auto_archive_leads: true       # Move fully processed lead file to archives/ subdirectory
+
+smtp:
+  host: "smtp.gmail.com"
+  port: 465
+  secure: true
+  auth:
+    user: "your-email@gmail.com"
+    pass: "your-app-password"  # Gmail App Password (16 characters)
+  from_name: "Outreach Team"
+  from_email: "your-email@gmail.com"
+
+whatsapp:
+  session_name: "outreach-session"
+  auth_state_dir: "workflows/whatsapp/auth_info"
+  print_qr_in_terminal: true
+  connection_timeout_ms: 60000
+  retry_interval_seconds: 5
+
+paths:
+  assets:
+    whatsapp_proposal: "assets/whatsapp/proposal.txt"
+    whatsapp_demo: "assets/whatsapp/demo.mp4"
+    mail_proposal: "assets/mail/proposal.txt"
+    mail_demo: "assets/mail/demo.mp4"
+  leads:
+    whatsapp: "leads/whatsapp/numbers.yaml"
+    mail: "leads/mail/emails.yaml"
+    landline: "leads/landline/numbers.yaml"   # scraped landlines (no WhatsApp) are stored here
+  reports_dir: "reports"

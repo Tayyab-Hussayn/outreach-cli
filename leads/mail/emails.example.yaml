@@ -1,0 +1,20 @@
+# Email Leads List Template
+leads:
+  - email: "alex.rivera@example.com"
+    name: "Alex Rivera"
+    company: "Nexus Labs"
+    custom_note: "your recent product announcement on LinkedIn"
+    status: "pending"
+    sent_at: null
+  - email: "sarah.chen@example.com"
+    name: "Sarah Chen"
+    company: "Vanguard Tech"
+    custom_note: "your keynote on scaling operations"
+    status: "pending"
+    sent_at: null
+  - email: "marcus.brody@example.com"
+    name: "Marcus Brody"
+    company: "Apex Media"
+    custom_note: "your expansion into digital automation"
+    status: "pending"
+    sent_at: null

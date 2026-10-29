@@ -1,0 +1,16 @@
+Subject: {Streamlining outreach operations for {{company}}|Quick question regarding {{company}}'s outreach workflow|Automating client pipeline for {{company}}}
+
+{Hi|Hello|Hey} {{name}},
+
+I came across {{company}} and noticed {{custom_note}}.
+
+We recently developed an automated outreach workflow specifically designed to eliminate manual data entry, follow up with qualified leads on time, and scale pipeline communications seamlessly.
+
+I've attached a quick demo video (demo.mp4) highlighting how the workflow operates end-to-end.
+
+{Would you be open to a quick 10-minute discovery call sometime this week to see if this could be valuable for {{company}}?|Are you open to a brief conversation this week to see how this could benefit your team?}
+
+{Best regards|Warm regards|Best},
+
+Outreach Team
+automation@example.com

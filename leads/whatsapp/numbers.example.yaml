@@ -1,0 +1,20 @@
+# WhatsApp Leads List Template
+leads:
+  - phone: "+1234567890"
+    name: "Alex Rivera"
+    company: "Nexus Labs"
+    custom_note: "your recent product announcement on LinkedIn"
+    status: "pending"
+    sent_at: null
+  - phone: "+1987654321"
+    name: "Sarah Chen"
+    company: "Vanguard Tech"
+    custom_note: "your keynote on scaling operations"
+    status: "pending"
+    sent_at: null
+  - phone: "+1122334455"
+    name: "Marcus Brody"
+    company: "Apex Media"
+    custom_note: "your expansion into digital automation"
+    status: "pending"
+    sent_at: null
