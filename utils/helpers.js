@@ -455,3 +455,155 @@ export function saveAndPrintReport(workflowType, summaryData, leadRecords = []) 
 
   return reportFilePath;
 }
+
+/**
+ * Robust argument parser for workflow commands like /whatsapp and /mail.
+ * Supports:
+ *   /whatsapp 20
+ *   /whatsapp --limit 20
+ *   /whatsapp -l 20
+ *   /whatsapp --limit=20
+ *   /whatsapp --dry-run
+ *   /whatsapp -d
+ *   /whatsapp custom.yaml 20 --dry-run
+ *
+ * @param {Array<string>} args
+ * @returns {{ isDryRun: boolean, limit: number|null, customFilePath: string|null }}
+ */
+export function parseWorkflowArgs(args = []) {
+  let isDryRun = false;
+  let limit = null;
+  let customFilePath = null;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+
+    if (arg === '--dry-run' || arg === '-d') {
+      isDryRun = true;
+    } else if (arg === '--limit' || arg === '-l') {
+      if (i + 1 < args.length && /^\d+$/.test(args[i + 1])) {
+        limit = parseInt(args[i + 1], 10);
+        i++;
+      }
+    } else if (arg.startsWith('--limit=')) {
+      const val = arg.split('=')[1];
+      if (/^\d+$/.test(val)) {
+        limit = parseInt(val, 10);
+      }
+    } else if (/^\d+$/.test(arg)) {
+      // Bare number e.g. /whatsapp 20
+      limit = parseInt(arg, 10);
+    } else if (!arg.startsWith('-')) {
+      // Non-flag, non-number string is treated as file path
+      customFilePath = arg;
+    }
+  }
+
+  return { isDryRun, limit, customFilePath };
+}
+
+/**
+ * Updates a single lead's status/fields in-place inside the YAML leads file.
+ * This guarantees real-time persistence after every single message.
+ *
+ * @param {string} filePath
+ * @param {Object} targetLead
+ * @param {Object} updates
+ * @returns {boolean} True if updated successfully
+ */
+export function updateLeadInYamlFile(filePath, targetLead, updates) {
+  try {
+    const absolutePath = path.resolve(filePath);
+    if (!fs.existsSync(absolutePath)) return false;
+
+    const fileContent = fs.readFileSync(absolutePath, 'utf8');
+    const parsed = yaml.load(fileContent);
+
+    let list = [];
+    let isObjectWrapper = false;
+
+    if (parsed && Array.isArray(parsed.leads)) {
+      list = parsed.leads;
+      isObjectWrapper = true;
+    } else if (Array.isArray(parsed)) {
+      list = parsed;
+    } else {
+      return false;
+    }
+
+    const targetDigits = targetLead.phone ? sanitizePhone(String(targetLead.phone)).digits : null;
+    const targetEmail = targetLead.email ? String(targetLead.email).toLowerCase().trim() : null;
+    const targetId = targetLead.id || null;
+
+    let found = false;
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      if (!item || typeof item !== 'object') continue;
+
+      let match = false;
+      if (targetId && item.id && String(item.id) === String(targetId)) {
+        match = true;
+      } else if (targetDigits && item.phone) {
+        const itemDigits = sanitizePhone(String(item.phone)).digits;
+        if (itemDigits && itemDigits === targetDigits) {
+          match = true;
+        }
+      } else if (targetEmail && item.email) {
+        if (String(item.email).toLowerCase().trim() === targetEmail) {
+          match = true;
+        }
+      }
+
+      if (match) {
+        list[i] = { ...item, ...updates };
+        found = true;
+        break;
+      }
+    }
+
+    if (found) {
+      const payload = isObjectWrapper ? { leads: list } : list;
+      fs.writeFileSync(absolutePath, yaml.dump(payload, { indent: 2, lineWidth: -1 }), 'utf8');
+      return true;
+    }
+  } catch (err) {
+    console.warn(`[Warning] Could not update lead in ${filePath}:`, err.message);
+  }
+  return false;
+}
+
+/**
+ * Returns summary counts (total, pending, sent, other) for a leads file.
+ *
+ * @param {string} filePath
+ * @param {'whatsapp'|'mail'} type
+ * @returns {{ total: number, pending: number, sent: number, other: number, exists: boolean }}
+ */
+export function getLeadsSummary(filePath, type = 'whatsapp') {
+  try {
+    const absolutePath = path.resolve(filePath);
+    if (!fs.existsSync(absolutePath)) {
+      return { total: 0, pending: 0, sent: 0, other: 0, exists: false };
+    }
+    const leads = loadLeadsYaml(absolutePath, type);
+    let pending = 0;
+    let sent = 0;
+    let other = 0;
+
+    for (const lead of leads) {
+      const status = String(lead.status || 'pending').toLowerCase().trim();
+      if (status === 'pending') {
+        pending++;
+      } else if (status === 'sent') {
+        sent++;
+      } else {
+        other++;
+      }
+    }
+
+    return { total: leads.length, pending, sent, other, exists: true };
+  } catch (_) {
+    return { total: 0, pending: 0, sent: 0, other: 0, exists: false };
+  }
+}
+

@@ -33,7 +33,8 @@ import {
   verifyWorkflowAssets,
   delayGaussian,
   saveAndPrintReport,
-  archiveCompletedLeadsFile
+  archiveCompletedLeadsFile,
+  updateLeadInYamlFile
 } from '../../utils/helpers.js';
 
 /**
@@ -42,11 +43,12 @@ import {
  * @param {Object} options
  * @param {Array<Object>} options.leads - List of lead objects
  * @param {Object} options.config - Parsed settings.yaml
- * @param {string} [options.leadsFilePath] - Original path of the leads file for archiving
+ * @param {string} [options.leadsFilePath] - Original path of the leads file for archiving & in-place status tracking
  * @param {boolean} [options.dryRun=false] - Simulation mode without actually dispatching
+ * @param {number|null} [options.limit=null] - Maximum number of pending leads to process in this run
  * @returns {Promise<Object>} Summary results
  */
-export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null, dryRun = false }) {
+export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null, dryRun = false, limit = null }) {
   console.log('\n======================================================');
   console.log('       STARTING WHATSAPP OUTREACH WORKFLOW            ');
   console.log('======================================================\n');
@@ -64,12 +66,33 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
 
   console.log(`✓ Loaded Proposal Template : ${assetCheck.proposalPath}`);
   console.log(`✓ Loaded Demo Video        : ${demoVideoPath} (${demoVideoBuffer.length} bytes)`);
-  console.log(`✓ Total Leads Queued       : ${leads.length}\n`);
 
-  if (leads.length === 0) {
-    console.log('[Notice] No leads to process.');
-    return { total: 0, sent: 0, notOnWhatsApp: 0, invalid: 0, failed: 0 };
+  // Separate pending vs already processed leads
+  const allLeads = leads;
+  const pendingLeads = allLeads.filter((l) => !l.status || String(l.status).toLowerCase().trim() === 'pending');
+  const alreadyProcessedCount = allLeads.length - pendingLeads.length;
+
+  console.log(`\n📋 Lead Queue Status:`);
+  console.log(`  - Total Leads in File : ${allLeads.length}`);
+  console.log(`  - Already Processed   : ${alreadyProcessedCount} (sent / skipped / invalid)`);
+  console.log(`  - Pending Outreach    : \x1b[32m${pendingLeads.length}\x1b[0m`);
+
+  if (pendingLeads.length === 0) {
+    console.log(`\n\x1b[32m[All Completed]\x1b[0m All ${allLeads.length} leads in ${leadsFilePath || 'the list'} have already been contacted.`);
+    console.log(`No pending leads left to message. Add new leads or reset status to 'pending' to run again.\n`);
+    return { total: allLeads.length, pending: 0, sent: 0, completed: true };
   }
+
+  // Determine batch count based on limit or all pending leads
+  const batchLimit = (typeof limit === 'number' && limit > 0) ? limit : pendingLeads.length;
+  const targetBatch = pendingLeads.slice(0, batchLimit);
+  const remainingAfterBatch = pendingLeads.length - targetBatch.length;
+
+  console.log(`\n🚀 Target Batch: Processing \x1b[1m\x1b[32m${targetBatch.length}\x1b[0m pending lead(s)`);
+  if (remainingAfterBatch > 0) {
+    console.log(`ℹ \x1b[33m${remainingAfterBatch}\x1b[0m pending lead(s) will remain untouched for your next run.`);
+  }
+  console.log('');
 
   const spintaxEnabled = config.safety?.anti_fingerprint?.spintax_enabled ?? true;
   const zeroWidthEnabled = config.safety?.anti_fingerprint?.zero_width_hash ?? true;
@@ -77,22 +100,27 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
   // 2. Dry Run Simulation Mode
   if (dryRun) {
     console.log('--- DRY RUN / PREVIEW MODE ACTIVATED ---');
+    console.log(`Simulating outreach to the next ${targetBatch.length} pending lead(s) (no messages sent):\n`);
     const simulationRecords = [];
-    for (let i = 0; i < leads.length; i++) {
-      const lead = leads[i];
+    for (let i = 0; i < targetBatch.length; i++) {
+      const lead = targetBatch[i];
       const phoneValidation = sanitizePhone(lead.phone);
       const renderedText = renderProposal(proposalTemplate, lead, {
         enableSpintax: spintaxEnabled,
         enableZeroWidth: zeroWidthEnabled
       });
 
-      console.log(`\n[Simulation ${i + 1}/${leads.length}] Target: ${lead.phone} | Name: ${lead.name || '(skipped)'}`);
+      console.log(`\n[Simulation ${i + 1}/${targetBatch.length}] Target: ${lead.phone} | Name: ${lead.name || '(unnamed)'}`);
       console.log(`Valid Phone Format: ${phoneValidation.valid ? 'YES (' + phoneValidation.jid + ')' : 'NO'}`);
-      console.log('Rendered Proposal (with Spintax & Personalization):');
+      console.log('Rendered Proposal (Preview):');
       console.log('--------------------------------------------------');
       console.log(renderedText);
       console.log('--------------------------------------------------');
-      console.log(`Attachment: ${demoVideoPath}`);
+      if (demoVideoBuffer.length > 0) {
+        console.log(`Video Attachment: ${path.basename(demoVideoPath)} (${demoVideoBuffer.length} bytes)`);
+      } else {
+        console.log(`Video Attachment: [None] demo.mp4 is 0-bytes placeholder`);
+      }
 
       simulationRecords.push({
         ...lead,
@@ -100,11 +128,11 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
       });
     }
     console.log('\n--- Simulation Completed Successfully ---');
-    if (leadsFilePath) {
-      console.log(`[Archive Info] On live run, completed file would be moved to: ${path.join(path.dirname(leadsFilePath), 'archives')}`);
+    console.log(`In a live run, these ${targetBatch.length} leads will be messaged and marked as 'sent' in ${leadsFilePath || 'numbers.yaml'}.`);
+    if (remainingAfterBatch > 0) {
+      console.log(`${remainingAfterBatch} pending leads will remain queued for future runs.\n`);
     }
-    console.log('');
-    return { total: leads.length, simulated: true };
+    return { total: targetBatch.length, simulated: true };
   }
 
   // 3. Prepare Baileys Auth State Directory
@@ -135,7 +163,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
 
     const leadRecords = [];
     const summary = {
-      total: leads.length,
+      total: targetBatch.length,
       sent: 0,
       notOnWhatsApp: 0,
       invalid: 0,
@@ -154,10 +182,14 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
         } catch (_) {}
       }
 
-      // Auto-archive leads file if enabled and not tripped by circuit breaker early
+      // Check if all leads in file are now finished
       const shouldArchive = config.safety?.auto_archive_leads ?? true;
-      if (shouldArchive && leadsFilePath && fs.existsSync(leadsFilePath) && !summary.circuitBreakerTripped) {
+      if (shouldArchive && leadsFilePath && fs.existsSync(leadsFilePath) && !summary.circuitBreakerTripped && remainingAfterBatch === 0) {
+        console.log(`\n\x1b[32m[All Leads Completed]\x1b[0m All leads in ${leadsFilePath} have been contacted.`);
         archiveCompletedLeadsFile(leadsFilePath);
+      } else if (remainingAfterBatch > 0 && leadsFilePath) {
+        console.log(`\n\x1b[36m[Progress Saved]\x1b[0m Updated statuses in ${leadsFilePath}.`);
+        console.log(`\x1b[32m${remainingAfterBatch}\x1b[0m pending lead(s) remain ready for your next run!\n`);
       }
 
       saveAndPrintReport('whatsapp', summary, leadRecords);
@@ -171,7 +203,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
       logger,
       browser: browserPreset,
       markOnlineOnConnect: !stealthConnect,
-      syncFullHistory: true
+      syncFullHistory: false
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -193,13 +225,12 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const reason = lastDisconnect?.error?.message || 'Connection closed';
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
         console.log(`[WhatsApp] Connection closed (code: ${statusCode}, reason: ${reason})`);
 
         if (statusCode === DisconnectReason.loggedOut) {
           console.error('\x1b[31m[WhatsApp Error] Session logged out. Please remove auth_info and re-authenticate.\x1b[0m');
-          summary.failed = leads.length - (summary.sent + summary.notOnWhatsApp + summary.invalid);
+          summary.failed = targetBatch.length - (summary.sent + summary.notOnWhatsApp + summary.invalid);
           cleanupAndResolve();
         } else if (!hasResolved) {
           console.log('[WhatsApp] Temporary disconnect encountered. Reconnecting...');
@@ -231,13 +262,13 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
         const maxConsecutiveFailures = circuitConfig.max_consecutive_failures || 3;
         let consecutiveFailures = 0;
 
-        for (let i = 0; i < leads.length; i++) {
-          const lead = leads[i];
+        for (let i = 0; i < targetBatch.length; i++) {
+          const lead = targetBatch[i];
           const currentIndex = i + 1;
           const phoneClean = sanitizePhone(lead.phone);
 
           console.log(`\n------------------------------------------------------`);
-          console.log(`[Lead ${currentIndex}/${leads.length}] Processing: ${lead.phone} (${lead.name || 'Anonymous'})`);
+          console.log(`[Batch ${currentIndex}/${targetBatch.length}] Processing: ${lead.phone} (${lead.name || 'Anonymous'})`);
 
           // Step A: Phone Number Validation
           if (!phoneClean.valid) {
@@ -249,6 +280,12 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
               processed_at: new Date().toISOString()
             });
             summary.invalid++;
+            if (leadsFilePath) {
+              updateLeadInYamlFile(leadsFilePath, lead, {
+                status: 'invalid_format',
+                processed_at: new Date().toISOString()
+              });
+            }
             continue;
           }
 
@@ -267,7 +304,13 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
                 processed_at: new Date().toISOString()
               });
               summary.notOnWhatsApp++;
-              continue; // Move on without getting stuck!
+              if (leadsFilePath) {
+                updateLeadInYamlFile(leadsFilePath, lead, {
+                  status: 'not_on_whatsapp',
+                  processed_at: new Date().toISOString()
+                });
+              }
+              continue;
             }
 
             const targetJid = onWaResult[0].jid || phoneClean.jid;
@@ -320,12 +363,20 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
             summary.sent++;
             consecutiveFailures = 0; // Reset circuit breaker counter on success
 
+            // Immediate real-time persistence
+            if (leadsFilePath) {
+              updateLeadInYamlFile(leadsFilePath, lead, {
+                status: 'sent',
+                sent_at: new Date().toISOString()
+              });
+            }
+
             // Step F: Human Rest Break (Batch Breaks) or Gaussian Delay
-            if (isBatchBreakEnabled && summary.sent > 0 && summary.sent % breakInterval === 0 && i < leads.length - 1) {
+            if (isBatchBreakEnabled && summary.sent > 0 && summary.sent % breakInterval === 0 && i < targetBatch.length - 1) {
               const restSec = Math.floor(Math.random() * (maxRestSec - minRestSec + 1)) + minRestSec;
               console.log(`\n\x1b[36m[HUMAN REST BREAK] Sent ${summary.sent} messages. Taking a ${restSec}s rest break to mimic real human behavior...\x1b[0m`);
               await new Promise((r) => setTimeout(r, restSec * 1000));
-            } else if (i < leads.length - 1) {
+            } else if (i < targetBatch.length - 1) {
               console.log(`Applying Gaussian anti-ban delay...`);
               const delayWaited = await delayGaussian(minDelay, maxDelay);
               console.log(`Waited ${(delayWaited / 1000).toFixed(1)}s. Moving to next lead...`);
@@ -341,6 +392,14 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
             });
             summary.failed++;
             consecutiveFailures++;
+
+            if (leadsFilePath) {
+              updateLeadInYamlFile(leadsFilePath, lead, {
+                status: 'failed',
+                error: err.message,
+                processed_at: new Date().toISOString()
+              });
+            }
 
             // Circuit Breaker Check
             if (isCircuitEnabled && consecutiveFailures >= maxConsecutiveFailures) {

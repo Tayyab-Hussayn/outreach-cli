@@ -17,8 +17,9 @@ import path from 'path';
 import yaml from 'js-yaml';
 import dotenv from 'dotenv';
 
-import { loadLeadsYaml } from './utils/helpers.js';
+import { loadLeadsYaml, parseWorkflowArgs, getLeadsSummary } from './utils/helpers.js';
 import { runWhatsAppWorkflow } from './workflows/whatsapp/index.js';
+import { logoutWhatsApp } from './workflows/whatsapp/logout.js';
 import { runMailWorkflow } from './workflows/mail/index.js';
 import { runScraperWorkflow } from './workflows/scraper/index.js';
 
@@ -81,16 +82,25 @@ function printHelp() {
   console.log(`
 \x1b[1m\x1b[36mOUTREACH CLI - Available Slash Commands\x1b[0m
 ====================================================================
-  \x1b[32m/whatsapp\x1b[0m [file.yaml] [--dry-run]
+  \x1b[32m/whatsapp\x1b[0m [limit] [file.yaml] [--dry-run]
       Launch WhatsApp outreach via Baileys.
+      - Specify batch count: e.g. /whatsapp 20 or /whatsapp --limit 20
+      - Next run automatically resumes from remaining pending leads!
+      - Updates status in-place (sent, not_on_whatsapp, invalid).
       - Scans QR in terminal on first run.
       - Pre-verifies numbers via sock.onWhatsApp() (skips unregistered).
       - Sends proposal message first, then demo video.
       - Default file: leads/whatsapp/numbers.yaml
       - Flag --dry-run / -d simulates run without sending.
 
-  \x1b[32m/mail\x1b[0m [file.yaml] [--dry-run]
+  \x1b[32m/whatsapp logout\x1b[0m
+      Remove the saved WhatsApp session (creds) from this machine.
+      - Next /whatsapp run asks for a fresh QR scan.
+
+  \x1b[32m/mail\x1b[0m [limit] [file.yaml] [--dry-run]
       Launch Gmail outreach via Nodemailer (SMTP).
+      - Specify batch count: e.g. /mail 20 or /mail --limit 20
+      - Next run automatically resumes from remaining pending leads!
       - Sends personalized subject & body with demo.mp4 attached.
       - Default file: leads/mail/emails.yaml
       - Flag --dry-run / -d simulates run without sending.
@@ -154,14 +164,8 @@ function printStatus(config) {
   const waLeadsPath = path.resolve(config.paths?.leads?.whatsapp || 'leads/whatsapp/numbers.yaml');
   const mailLeadsPath = path.resolve(config.paths?.leads?.mail || 'leads/mail/emails.yaml');
 
-  let waLeadsCount = 0;
-  let mailLeadsCount = 0;
-  try {
-    if (fs.existsSync(waLeadsPath)) waLeadsCount = loadLeadsYaml(waLeadsPath, 'whatsapp').length;
-  } catch (_) {}
-  try {
-    if (fs.existsSync(mailLeadsPath)) mailLeadsCount = loadLeadsYaml(mailLeadsPath, 'mail').length;
-  } catch (_) {}
+  const waSum = getLeadsSummary(waLeadsPath, 'whatsapp');
+  const mailSum = getLeadsSummary(mailLeadsPath, 'mail');
 
   const waArchivesDir = path.resolve('leads/whatsapp/archives');
   const mailArchivesDir = path.resolve('leads/mail/archives');
@@ -169,8 +173,8 @@ function printStatus(config) {
   const mailArchivedCount = fs.existsSync(mailArchivesDir) ? fs.readdirSync(mailArchivesDir).filter(f => f.endsWith('.yaml') || f.endsWith('.yml')).length : 0;
 
   console.log('\nLeads Queued:');
-  console.log(`  - WhatsApp Leads    : ${waLeadsCount} active lead(s) in ${waLeadsPath} (${waArchivedCount} archived files)`);
-  console.log(`  - Mail Leads        : ${mailLeadsCount} active lead(s) in ${mailLeadsPath} (${mailArchivedCount} archived files)`);
+  console.log(`  - WhatsApp Leads    : \x1b[32m${waSum.pending} pending\x1b[0m (${waSum.sent} sent, ${waSum.total} total) in ${waLeadsPath} (${waArchivedCount} archived files)`);
+  console.log(`  - Mail Leads        : \x1b[32m${mailSum.pending} pending\x1b[0m (${mailSum.sent} sent, ${mailSum.total} total) in ${mailLeadsPath} (${mailArchivedCount} archived files)`);
 
   // Scraper Engine Check
   const scraperEngineDir = path.resolve('workflows/scraper/engine');
@@ -193,7 +197,7 @@ function printStatus(config) {
  * Tab-completion function for readline
  */
 function completer(line) {
-  const completions = ['/whatsapp', '/mail', '/scrape', '/status', '/help', '/clear', '/exit'];
+  const completions = ['/whatsapp', '/whatsapp logout', '/mail', '/scrape', '/status', '/help', '/clear', '/exit'];
   const hits = completions.filter((c) => c.startsWith(line.trim()));
   return [hits.length ? hits : completions, line];
 }
@@ -204,6 +208,52 @@ function completer(line) {
 async function runCli() {
   ensureDirectories();
   let config = loadConfig();
+
+  // Support direct execution via CLI args e.g. ./cli.sh /whatsapp 20
+  const cliArgs = process.argv.slice(2);
+  if (cliArgs.length > 0) {
+    let rawCommand = cliArgs.join(' ');
+    if (!rawCommand.startsWith('/')) rawCommand = '/' + rawCommand;
+    const [cmd, ...args] = rawCommand.split(/\s+/);
+    const { isDryRun, limit, customFilePath } = parseWorkflowArgs(args);
+
+    try {
+      switch (cmd) {
+        case '/whatsapp': {
+          if (args[0]?.toLowerCase() === 'logout') {
+            logoutWhatsApp(config);
+            break;
+          }
+          const targetFile = customFilePath || config.paths?.leads?.whatsapp || 'leads/whatsapp/numbers.yaml';
+          console.log(`\nLoading WhatsApp leads from: ${targetFile}`);
+          if (limit) console.log(`\x1b[36m[Limit Specified]\x1b[0m Batch limit: \x1b[1m${limit}\x1b[0m pending lead(s) for this run.`);
+          let leads = loadLeadsYaml(targetFile, 'whatsapp');
+          if (isDryRun) console.log('\x1b[33m[Mode: Dry-Run / Preview]\x1b[0m');
+          await runWhatsAppWorkflow({ leads, config, leadsFilePath: targetFile, dryRun: isDryRun, limit });
+          break;
+        }
+        case '/mail': {
+          const targetFile = customFilePath || config.paths?.leads?.mail || 'leads/mail/emails.yaml';
+          console.log(`\nLoading Mail leads from: ${targetFile}`);
+          if (limit) console.log(`\x1b[36m[Limit Specified]\x1b[0m Batch limit: \x1b[1m${limit}\x1b[0m pending lead(s) for this run.`);
+          let leads = loadLeadsYaml(targetFile, 'mail');
+          if (isDryRun) console.log('\x1b[33m[Mode: Dry-Run / Preview]\x1b[0m');
+          await runMailWorkflow({ leads, config, leadsFilePath: targetFile, dryRun: isDryRun, limit });
+          break;
+        }
+        case '/status': {
+          printStatus(config);
+          break;
+        }
+        default: {
+          console.log(`Unknown CLI command: ${cmd}`);
+        }
+      }
+    } catch (err) {
+      console.error(`\x1b[31m[Error]\x1b[0m ${err.message}`);
+    }
+    process.exit(0);
+  }
 
   console.log('\x1b[1m\x1b[34m');
   console.log('╔═══════════════════════════════════════════════════════════════════╗');
@@ -230,8 +280,7 @@ async function runCli() {
     }
 
     const [cmd, ...args] = rawInput.split(/\s+/);
-    const isDryRun = args.includes('--dry-run') || args.includes('-d');
-    const customFilePath = args.find((a) => !a.startsWith('-'));
+    const { isDryRun, limit, customFilePath } = parseWorkflowArgs(args);
 
     // Pause readline input while running workflows
     rl.pause();
@@ -239,9 +288,16 @@ async function runCli() {
     try {
       switch (cmd) {
         case '/whatsapp': {
+          if (args[0]?.toLowerCase() === 'logout') {
+            logoutWhatsApp(config);
+            break;
+          }
           config = loadConfig();
           const targetFile = customFilePath || config.paths?.leads?.whatsapp || 'leads/whatsapp/numbers.yaml';
           console.log(`\nLoading WhatsApp leads from: ${targetFile}`);
+          if (limit) {
+            console.log(`\x1b[36m[Limit Specified]\x1b[0m Batch limit: \x1b[1m${limit}\x1b[0m pending lead(s) for this run.`);
+          }
 
           let leads = [];
           try {
@@ -255,7 +311,13 @@ async function runCli() {
             console.log('\x1b[33m[Mode: Dry-Run / Preview]\x1b[0m');
           }
 
-          await runWhatsAppWorkflow({ leads, config, leadsFilePath: targetFile, dryRun: isDryRun });
+          await runWhatsAppWorkflow({
+            leads,
+            config,
+            leadsFilePath: targetFile,
+            dryRun: isDryRun,
+            limit
+          });
           break;
         }
 
@@ -263,6 +325,9 @@ async function runCli() {
           config = loadConfig();
           const targetFile = customFilePath || config.paths?.leads?.mail || 'leads/mail/emails.yaml';
           console.log(`\nLoading Mail leads from: ${targetFile}`);
+          if (limit) {
+            console.log(`\x1b[36m[Limit Specified]\x1b[0m Batch limit: \x1b[1m${limit}\x1b[0m pending lead(s) for this run.`);
+          }
 
           let leads = [];
           try {
@@ -276,7 +341,13 @@ async function runCli() {
             console.log('\x1b[33m[Mode: Dry-Run / Preview]\x1b[0m');
           }
 
-          await runMailWorkflow({ leads, config, leadsFilePath: targetFile, dryRun: isDryRun });
+          await runMailWorkflow({
+            leads,
+            config,
+            leadsFilePath: targetFile,
+            dryRun: isDryRun,
+            limit
+          });
           break;
         }
 

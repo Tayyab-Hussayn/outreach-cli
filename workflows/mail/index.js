@@ -23,7 +23,8 @@ import {
   verifyWorkflowAssets,
   delayGaussian,
   saveAndPrintReport,
-  archiveCompletedLeadsFile
+  archiveCompletedLeadsFile,
+  updateLeadInYamlFile
 } from '../../utils/helpers.js';
 
 /**
@@ -61,7 +62,7 @@ function parseEmailTemplate(rawTemplate) {
  * @param {boolean} [options.dryRun=false] - Simulation mode
  * @returns {Promise<Object>}
  */
-export async function runMailWorkflow({ leads, config, leadsFilePath = null, dryRun = false }) {
+export async function runMailWorkflow({ leads, config, leadsFilePath = null, dryRun = false, limit = null }) {
   console.log('\n======================================================');
   console.log('         STARTING GMAIL OUTREACH WORKFLOW             ');
   console.log('======================================================\n');
@@ -80,12 +81,30 @@ export async function runMailWorkflow({ leads, config, leadsFilePath = null, dry
   console.log(`✓ Loaded Email Proposal    : ${assetCheck.proposalPath}`);
   console.log(`✓ Default Subject Template : ${rawSubject}`);
   console.log(`✓ Loaded Video Attachment  : ${demoPath} (${fs.statSync(demoPath).size} bytes)`);
-  console.log(`✓ Total Leads Queued       : ${leads.length}\n`);
 
-  if (leads.length === 0) {
-    console.log('[Notice] No email leads to process.');
-    return { total: 0, sent: 0, invalid: 0, failed: 0 };
+  const allLeads = leads;
+  const pendingLeads = allLeads.filter((l) => !l.status || String(l.status).toLowerCase().trim() === 'pending');
+  const alreadyProcessedCount = allLeads.length - pendingLeads.length;
+
+  console.log(`\n📋 Lead Queue Status:`);
+  console.log(`  - Total Leads in File : ${allLeads.length}`);
+  console.log(`  - Already Processed   : ${alreadyProcessedCount}`);
+  console.log(`  - Pending Outreach    : \x1b[32m${pendingLeads.length}\x1b[0m`);
+
+  if (pendingLeads.length === 0) {
+    console.log(`\n\x1b[32m[All Completed]\x1b[0m All ${allLeads.length} email leads have already been processed.\n`);
+    return { total: allLeads.length, sent: 0, pending: 0 };
   }
+
+  const batchLimit = (typeof limit === 'number' && limit > 0) ? limit : pendingLeads.length;
+  const targetBatch = pendingLeads.slice(0, batchLimit);
+  const remainingAfterBatch = pendingLeads.length - targetBatch.length;
+
+  console.log(`\n🚀 Target Batch: Processing \x1b[1m\x1b[32m${targetBatch.length}\x1b[0m pending lead(s)`);
+  if (remainingAfterBatch > 0) {
+    console.log(`ℹ \x1b[33m${remainingAfterBatch}\x1b[0m pending lead(s) will remain in queue for your next run.`);
+  }
+  console.log('');
 
   const spintaxEnabled = config.safety?.anti_fingerprint?.spintax_enabled ?? true;
 
@@ -93,13 +112,13 @@ export async function runMailWorkflow({ leads, config, leadsFilePath = null, dry
   if (dryRun) {
     console.log('--- DRY RUN / PREVIEW MODE ACTIVATED ---');
     const simulationRecords = [];
-    for (let i = 0; i < leads.length; i++) {
-      const lead = leads[i];
+    for (let i = 0; i < targetBatch.length; i++) {
+      const lead = targetBatch[i];
       const valid = isValidEmail(lead.email);
       const subject = renderProposal(rawSubject, lead, { enableSpintax: spintaxEnabled });
       const body = renderProposal(rawBody, lead, { enableSpintax: spintaxEnabled });
 
-      console.log(`\n[Simulation ${i + 1}/${leads.length}] Target: ${lead.email} | Name: ${lead.name || '(skipped)'}`);
+      console.log(`\n[Simulation ${i + 1}/${targetBatch.length}] Target: ${lead.email} | Name: ${lead.name || '(unnamed)'}`);
       console.log(`Valid Email Syntax: ${valid ? 'YES' : 'NO'}`);
       console.log(`Subject: ${subject}`);
       console.log('Body:');
@@ -115,11 +134,10 @@ export async function runMailWorkflow({ leads, config, leadsFilePath = null, dry
       });
     }
     console.log('\n--- Simulation Completed Successfully ---');
-    if (leadsFilePath) {
-      console.log(`[Archive Info] On live run, completed file would be moved to: ${path.join(path.dirname(leadsFilePath), 'archives')}`);
+    if (remainingAfterBatch > 0) {
+      console.log(`${remainingAfterBatch} pending leads will remain queued for future runs.\n`);
     }
-    console.log('');
-    return { total: leads.length, simulated: true };
+    return { total: targetBatch.length, simulated: true };
   }
 
   // 3. Initialize Nodemailer Transporter
@@ -165,7 +183,7 @@ export async function runMailWorkflow({ leads, config, leadsFilePath = null, dry
   let consecutiveFailures = 0;
 
   const summary = {
-    total: leads.length,
+    total: targetBatch.length,
     sent: 0,
     invalid: 0,
     failed: 0,
@@ -173,12 +191,12 @@ export async function runMailWorkflow({ leads, config, leadsFilePath = null, dry
   };
   const leadRecords = [];
 
-  for (let i = 0; i < leads.length; i++) {
-    const lead = leads[i];
+  for (let i = 0; i < targetBatch.length; i++) {
+    const lead = targetBatch[i];
     const currentIndex = i + 1;
 
     console.log(`\n------------------------------------------------------`);
-    console.log(`[Lead ${currentIndex}/${leads.length}] Processing: ${lead.email} (${lead.name || 'Anonymous'})`);
+    console.log(`[Batch ${currentIndex}/${targetBatch.length}] Processing: ${lead.email} (${lead.name || 'Anonymous'})`);
 
     // Validation
     if (!isValidEmail(lead.email)) {
@@ -190,6 +208,12 @@ export async function runMailWorkflow({ leads, config, leadsFilePath = null, dry
         processed_at: new Date().toISOString()
       });
       summary.invalid++;
+      if (leadsFilePath) {
+        updateLeadInYamlFile(leadsFilePath, lead, {
+          status: 'invalid_format',
+          processed_at: new Date().toISOString()
+        });
+      }
       continue;
     }
 
@@ -230,8 +254,15 @@ export async function runMailWorkflow({ leads, config, leadsFilePath = null, dry
       summary.sent++;
       consecutiveFailures = 0;
 
+      if (leadsFilePath) {
+        updateLeadInYamlFile(leadsFilePath, lead, {
+          status: 'sent',
+          sent_at: new Date().toISOString()
+        });
+      }
+
       // Rate limit delay
-      if (i < leads.length - 1) {
+      if (i < targetBatch.length - 1) {
         console.log(`Applying rate-limiting delay...`);
         const delayWaited = await delayGaussian(minDelay, maxDelay);
         console.log(`Waited ${(delayWaited / 1000).toFixed(1)}s. Moving to next lead...`);
@@ -248,6 +279,14 @@ export async function runMailWorkflow({ leads, config, leadsFilePath = null, dry
       summary.failed++;
       consecutiveFailures++;
 
+      if (leadsFilePath) {
+        updateLeadInYamlFile(leadsFilePath, lead, {
+          status: 'failed',
+          error: err.message,
+          processed_at: new Date().toISOString()
+        });
+      }
+
       if (isCircuitEnabled && consecutiveFailures >= maxConsecutiveFailures) {
         console.error(`\n\x1b[41m\x1b[37m[CIRCUIT BREAKER TRIPPED]\x1b[0m ${consecutiveFailures} consecutive email dispatches failed! Halting workflow.`);
         summary.circuitBreakerTripped = true;
@@ -258,10 +297,12 @@ export async function runMailWorkflow({ leads, config, leadsFilePath = null, dry
     }
   }
 
-  // Auto-archive completed file if enabled and not tripped early
+  // Auto-archive completed file if all leads finished
   const shouldArchive = config.safety?.auto_archive_leads ?? true;
-  if (shouldArchive && leadsFilePath && fs.existsSync(leadsFilePath) && !summary.circuitBreakerTripped) {
+  if (shouldArchive && leadsFilePath && fs.existsSync(leadsFilePath) && !summary.circuitBreakerTripped && remainingAfterBatch === 0) {
     archiveCompletedLeadsFile(leadsFilePath);
+  } else if (remainingAfterBatch > 0 && leadsFilePath) {
+    console.log(`\n\x1b[36m[Progress Saved]\x1b[0m ${leadsFilePath} updated. \x1b[32m${remainingAfterBatch}\x1b[0m pending leads remaining for next run.\n`);
   }
 
   saveAndPrintReport('mail', summary, leadRecords);
