@@ -27,6 +27,8 @@ import {
   Browsers
 } from '@whiskeysockets/baileys';
 
+import { getSessionInfo, writeSessionMeta, invalidateSession } from './session.js';
+
 import {
   renderProposal,
   sanitizePhone,
@@ -65,7 +67,11 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
   const demoVideoBuffer = fs.readFileSync(demoVideoPath);
 
   console.log(`✓ Loaded Proposal Template : ${assetCheck.proposalPath}`);
-  console.log(`✓ Loaded Demo Video        : ${demoVideoPath} (${demoVideoBuffer.length} bytes)`);
+  if (demoVideoBuffer.length > 0) {
+    console.log(`✓ Loaded Demo Video        : ${demoVideoPath} (${demoVideoBuffer.length} bytes)`);
+  } else {
+    console.log(`\x1b[33m⚠ Demo Video is empty (0 bytes)\x1b[0m: only the text proposal will be sent (${demoVideoPath})`);
+  }
 
   // Separate pending vs already processed leads
   const allLeads = leads;
@@ -135,6 +141,21 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
     return { total: targetBatch.length, simulated: true };
   }
 
+  // 2b. Session preflight: a verified, linked WhatsApp account is required (see /whatsapp scan)
+  const sessionInfo = getSessionInfo(config);
+  if (sessionInfo.state !== 'linked') {
+    console.log('\n\x1b[41m\x1b[37m NO LINKED WHATSAPP \x1b[0m');
+    if (sessionInfo.state === 'unverified') {
+      console.log('A saved session exists but was never confirmed (interrupted or revoked pairing).');
+    } else {
+      console.log('No WhatsApp account is linked on this machine yet.');
+    }
+    console.log('→ Run \x1b[32m/whatsapp scan\x1b[0m to link one, then run \x1b[32m/whatsapp\x1b[0m again.');
+    console.log('\x1b[2mNo leads were touched.\x1b[0m\n');
+    return { error: 'no_session', aborted: true, total: targetBatch.length, sent: 0, failed: 0 };
+  }
+  console.log(`🔐 WhatsApp Session : \x1b[32mlinked\x1b[0m as ${sessionInfo.number || 'unknown'}${sessionInfo.name ? ` (${sessionInfo.name})` : ''}\n`);
+
   // 3. Prepare Baileys Auth State Directory
   const authDir = path.resolve(config.whatsapp?.auth_state_dir || 'workflows/whatsapp/auth_info');
   if (!fs.existsSync(authDir)) {
@@ -144,7 +165,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
   console.log('[WhatsApp] Connecting to WhatsApp via Baileys...');
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version, isLatest } = await fetchLatestBaileysVersion();
-  console.log(`[WhatsApp] Baileys Version: ${version.join('.')} (Latest: ${isLatest})`);
+  console.log(`[WhatsApp] WhatsApp Web version: ${version.join('.')} (Latest: ${isLatest})`);
 
   // Silent logger to avoid polluting stdout
   const logger = pino({ level: 'silent' });
@@ -159,6 +180,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
 
   return new Promise((resolve) => {
     let hasResolved = false;
+    let authFailed = false;
     let sock = null;
 
     const leadRecords = [];
@@ -182,6 +204,11 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
         } catch (_) {}
       }
 
+      if (authFailed) {
+        resolve({ error: 'auth_failed', aborted: true, total: targetBatch.length, sent: 0, failed: 0 });
+        return;
+      }
+
       // Check if all leads in file are now finished
       const shouldArchive = config.safety?.auto_archive_leads ?? true;
       if (shouldArchive && leadsFilePath && fs.existsSync(leadsFilePath) && !summary.circuitBreakerTripped && remainingAfterBatch === 0) {
@@ -196,19 +223,36 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
       resolve(summary);
     }
 
-    sock = makeWASocket({
-      version,
-      auth: state,
-      printQRInTerminal: false,
-      logger,
-      browser: browserPreset,
-      markOnlineOnConnect: !stealthConnect,
-      syncFullHistory: false
-    });
+    let campaignStarted = false;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECTS = 5;
 
-    sock.ev.on('creds.update', saveCreds);
+    // (Re)create the socket. Required right after a QR scan: WhatsApp closes the
+    // connection (restartRequired) and the client must reconnect with the paired creds.
+    function startSocket() {
+      if (sock) {
+        try {
+          sock.ev.removeAllListeners('connection.update');
+          sock.ev.removeAllListeners('creds.update');
+          sock.end(undefined);
+        } catch (_) {}
+      }
 
-    sock.ev.on('connection.update', async (update) => {
+      sock = makeWASocket({
+        version,
+        auth: state,
+        printQRInTerminal: false,
+        logger,
+        browser: browserPreset,
+        markOnlineOnConnect: !stealthConnect,
+        syncFullHistory: false
+      });
+
+      sock.ev.on('creds.update', saveCreds);
+      sock.ev.on('connection.update', onConnectionUpdate);
+    }
+
+    const onConnectionUpdate = async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       // Handle Terminal QR Code Display
@@ -229,16 +273,40 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
         console.log(`[WhatsApp] Connection closed (code: ${statusCode}, reason: ${reason})`);
 
         if (statusCode === DisconnectReason.loggedOut) {
-          console.error('\x1b[31m[WhatsApp Error] Session logged out. Please remove auth_info and re-authenticate.\x1b[0m');
-          summary.failed = targetBatch.length - (summary.sent + summary.notOnWhatsApp + summary.invalid);
+          invalidateSession(authDir);
+          if (!campaignStarted) {
+            authFailed = true;
+            console.error('\n\x1b[41m\x1b[37m WHATSAPP REJECTED THE SAVED SESSION \x1b[0m');
+            console.error(`WhatsApp answered ${statusCode} (${reason}): the link was revoked, expired, or never completed.`);
+            console.error('→ Run \x1b[32m/whatsapp scan\x1b[0m to link again, then retry.');
+            console.error('\x1b[2mNo leads were touched.\x1b[0m\n');
+          } else {
+            console.error('\x1b[31m[WhatsApp Error] Logged out during the run (device removed from the phone?). Run /whatsapp scan to link again.\x1b[0m');
+            summary.failed = targetBatch.length - (summary.sent + summary.notOnWhatsApp + summary.invalid);
+          }
           cleanupAndResolve();
+        } else if (!hasResolved && !campaignStarted) {
+          if (reconnectAttempts >= MAX_RECONNECTS) {
+            console.error(`\x1b[31m[WhatsApp Error] Could not connect after ${MAX_RECONNECTS} attempts (last code: ${statusCode}).\x1b[0m`);
+            summary.failed = targetBatch.length - (summary.sent + summary.notOnWhatsApp + summary.invalid);
+            cleanupAndResolve();
+          } else {
+            reconnectAttempts++;
+            const delayMs = statusCode === DisconnectReason.restartRequired ? 500 : 3000;
+            console.log(`[WhatsApp] Reconnecting (${reconnectAttempts}/${MAX_RECONNECTS})...`);
+            setTimeout(() => { if (!hasResolved) startSocket(); }, delayMs);
+          }
         } else if (!hasResolved) {
-          console.log('[WhatsApp] Temporary disconnect encountered. Reconnecting...');
+          console.log('[WhatsApp] Connection dropped during campaign.');
         }
       }
 
       // Handle Connection Open -> Run Campaign
       if (connection === 'open') {
+        if (campaignStarted) return;
+        campaignStarted = true;
+        reconnectAttempts = 0;
+        writeSessionMeta(authDir, { lastConnectedAt: new Date().toISOString() });
         console.log('\x1b[32m✓ WhatsApp Connection Opened Successfully!\x1b[0m\n');
 
         const minDelay = config.rate_limits?.whatsapp?.min_delay_seconds || 12;
@@ -416,6 +484,8 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
         console.log('\n[WhatsApp] All leads in batch have been processed.');
         cleanupAndResolve();
       }
-    });
+    };
+
+    startSocket();
   });
 }

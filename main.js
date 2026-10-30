@@ -20,6 +20,8 @@ import dotenv from 'dotenv';
 import { loadLeadsYaml, parseWorkflowArgs, getLeadsSummary } from './utils/helpers.js';
 import { runWhatsAppWorkflow } from './workflows/whatsapp/index.js';
 import { logoutWhatsApp } from './workflows/whatsapp/logout.js';
+import { runWhatsAppScan } from './workflows/whatsapp/scan.js';
+import { getSessionInfo } from './workflows/whatsapp/session.js';
 import { runMailWorkflow } from './workflows/mail/index.js';
 import { runScraperWorkflow } from './workflows/scraper/index.js';
 
@@ -87,15 +89,20 @@ function printHelp() {
       - Specify batch count: e.g. /whatsapp 20 or /whatsapp --limit 20
       - Next run automatically resumes from remaining pending leads!
       - Updates status in-place (sent, not_on_whatsapp, invalid).
-      - Scans QR in terminal on first run.
+      - Needs a linked account: run /whatsapp scan first.
       - Pre-verifies numbers via sock.onWhatsApp() (skips unregistered).
       - Sends proposal message first, then demo video.
       - Default file: leads/whatsapp/numbers.yaml
       - Flag --dry-run / -d simulates run without sending.
 
+  \x1b[32m/whatsapp scan\x1b[0m
+      Link a WhatsApp account: logs out any previous session, shows a fresh QR.
+      - Phone: Settings -> Linked devices -> Link a device, then scan.
+      - Saves the session and exits. No messages are sent.
+
   \x1b[32m/whatsapp logout\x1b[0m
       Remove the saved WhatsApp session (creds) from this machine.
-      - Next /whatsapp run asks for a fresh QR scan.
+      - Then use /whatsapp scan to link an account again.
 
   \x1b[32m/mail\x1b[0m [limit] [file.yaml] [--dry-run]
       Launch Gmail outreach via Nodemailer (SMTP).
@@ -145,8 +152,13 @@ function printStatus(config) {
 
   // WhatsApp Auth Session
   const authDir = path.resolve(config.whatsapp?.auth_state_dir || 'workflows/whatsapp/auth_info');
-  const hasCreds = fs.existsSync(path.join(authDir, 'creds.json'));
-  console.log(`WhatsApp Auth : ${hasCreds ? '\x1b[32mAUTHENTICATED (Active Session)\x1b[0m' : '\x1b[33mNO ACTIVE SESSION (Scan QR required on first run)\x1b[0m'}`);
+  const wa = getSessionInfo(config);
+  const waLine = wa.state === 'linked'
+    ? `\x1b[32mLINKED\x1b[0m as ${wa.number || 'unknown'}${wa.name ? ` (${wa.name})` : ''}`
+    : wa.state === 'unverified'
+      ? `\x1b[33mUNVERIFIED session\x1b[0m (${wa.number || 'unknown'}) - run /whatsapp scan`
+      : '\x1b[33mNOT LINKED\x1b[0m - run /whatsapp scan';
+  console.log(`WhatsApp Auth : ${waLine}`);
 
   // Assets Check
   const waProp = path.resolve(config.paths?.assets?.whatsapp_proposal || 'assets/whatsapp/proposal.txt');
@@ -197,7 +209,7 @@ function printStatus(config) {
  * Tab-completion function for readline
  */
 function completer(line) {
-  const completions = ['/whatsapp', '/whatsapp logout', '/mail', '/scrape', '/status', '/help', '/clear', '/exit'];
+  const completions = ['/whatsapp', '/whatsapp scan', '/whatsapp logout', '/mail', '/scrape', '/status', '/help', '/clear', '/exit'];
   const hits = completions.filter((c) => c.startsWith(line.trim()));
   return [hits.length ? hits : completions, line];
 }
@@ -222,6 +234,10 @@ async function runCli() {
         case '/whatsapp': {
           if (args[0]?.toLowerCase() === 'logout') {
             logoutWhatsApp(config);
+            break;
+          }
+          if (args[0]?.toLowerCase() === 'scan') {
+            await runWhatsAppScan(config);
             break;
           }
           const targetFile = customFilePath || config.paths?.leads?.whatsapp || 'leads/whatsapp/numbers.yaml';
@@ -290,6 +306,10 @@ async function runCli() {
         case '/whatsapp': {
           if (args[0]?.toLowerCase() === 'logout') {
             logoutWhatsApp(config);
+            break;
+          }
+          if (args[0]?.toLowerCase() === 'scan') {
+            await runWhatsAppScan(config);
             break;
           }
           config = loadConfig();
