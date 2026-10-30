@@ -20,9 +20,9 @@ safety:
     max_duration_seconds: 6      # Maximum typing indicator time
   batch_break:
     enabled: true
-    interval_messages: 5         # Take a human rest break every X messages
-    min_rest_seconds: 60         # 1 minute minimum rest
-    max_rest_seconds: 120        # 2 minutes maximum rest
+    interval_messages: 4          # Take a rest break every 4 leads
+    min_rest_seconds: 60         # Fixed 1 minute rest
+    max_rest_seconds: 60         # Same as min = exactly 1 minute
   circuit_breaker:
     enabled: true
     max_consecutive_failures: 3  # Stop workflow if 3 consecutive failures occur to avoid session ban
@@ -32,6 +32,33 @@ safety:
     browser_preset: "macOS"      # Official macOS Desktop Baileys fingerprint
     stealth_connect: true        # markOnlineOnConnect: false (avoids instant bot online flag)
   auto_archive_leads: true       # Move fully processed lead file to archives/ subdirectory
+  lead_hold:                     # Fixed hold after each lead, then the next lead is targeted
+    enabled: true
+    seconds: 10                  # 10s after every lead (replaces the random 12-28s delay while enabled)
+    jitter_percent: 20           # +/-20% -> 8-12s, so the rhythm is not robotic. Set 0 for exactly 10s
+  human_behavior:
+    enabled: true                # Master switch for everything below
+    presence_cycle: true         # "online" while messaging a lead, "offline" while holding
+    think_pause_seconds: [1, 4]  # Open the chat and think before typing
+    typing_bursts: true          # Long messages are typed in 2-3 bursts with small pauses
+    between_messages_seconds: [2, 5]   # Pause between the text and the demo video
+    linger_after_send_seconds: [2, 5]  # Stay in the chat after sending (counts inside the hold)
+    lookup_gap_seconds: [1.5, 4]       # Random gap before checking a number on WhatsApp
+    randomize_rest_interval: false     # Exactly every 4 leads (no 4-7 randomizing)
+    distraction:
+      chance_percent: 8          # Sometimes pause as if distracted
+      min_seconds: 20
+      max_seconds: 60
+  limits:
+    enforce_daily_limit: true    # Stop at rate_limits.whatsapp.daily_limit per day (/whatsapp + /followup together)
+    warmup:
+      enabled: true              # Newly linked accounts (/whatsapp scan) get a lower daily cap
+      schedule: [15, 25, 35]     # Day 1, 2, 3; from day 4 the normal daily_limit applies
+    active_hours:
+      enabled: true
+      start: "09:00"             # Only message during these local hours
+      end: "21:00"
+    abort_on_risk_signals: true  # Stop immediately on rate-limit / forbidden / blocked style errors
 
 smtp:
   host: "smtp.gmail.com"

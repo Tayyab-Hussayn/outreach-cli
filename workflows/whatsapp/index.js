@@ -28,6 +28,16 @@ import {
 } from '@whiskeysockets/baileys';
 
 import { getSessionInfo, writeSessionMeta, invalidateSession } from './session.js';
+import {
+  getHumanConfig,
+  humanSendText,
+  lookupGap,
+  betweenMessagesPause,
+  createPacer,
+  isRiskSignal,
+  runPreflight,
+  recordSent
+} from './human.js';
 
 import {
   renderProposal,
@@ -38,6 +48,8 @@ import {
   archiveCompletedLeadsFile,
   updateLeadInYamlFile
 } from '../../utils/helpers.js';
+import { getMessage, attachRetryStore, muteSignalNoise } from './retry-store.js';
+muteSignalNoise();
 
 /**
  * Runs the WhatsApp Baileys Outreach Workflow
@@ -92,7 +104,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
   // Determine batch count based on limit or all pending leads
   const batchLimit = (typeof limit === 'number' && limit > 0) ? limit : pendingLeads.length;
   const targetBatch = pendingLeads.slice(0, batchLimit);
-  const remainingAfterBatch = pendingLeads.length - targetBatch.length;
+  let remainingAfterBatch = pendingLeads.length - targetBatch.length;
 
   console.log(`\n🚀 Target Batch: Processing \x1b[1m\x1b[32m${targetBatch.length}\x1b[0m pending lead(s)`);
   if (remainingAfterBatch > 0) {
@@ -155,6 +167,16 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
     return { error: 'no_session', aborted: true, total: targetBatch.length, sent: 0, failed: 0 };
   }
   console.log(`🔐 WhatsApp Session : \x1b[32mlinked\x1b[0m as ${sessionInfo.number || 'unknown'}${sessionInfo.name ? ` (${sessionInfo.name})` : ''}\n`);
+
+  // 2c. Safety preflight: active hours + daily limit / warm-up (may trim the batch)
+  const preflight = runPreflight(config, targetBatch.length);
+  if (!preflight.ok) {
+    return { error: preflight.reason, aborted: true, total: targetBatch.length, sent: 0, failed: 0 };
+  }
+  if (preflight.allowed < targetBatch.length) {
+    remainingAfterBatch += targetBatch.length - preflight.allowed;
+    targetBatch.length = preflight.allowed;
+  }
 
   // 3. Prepare Baileys Auth State Directory
   const authDir = path.resolve(config.whatsapp?.auth_state_dir || 'workflows/whatsapp/auth_info');
@@ -245,9 +267,11 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
         logger,
         browser: browserPreset,
         markOnlineOnConnect: !stealthConnect,
-        syncFullHistory: false
+        syncFullHistory: false,
+        getMessage
       });
 
+      attachRetryStore(sock);
       sock.ev.on('creds.update', saveCreds);
       sock.ev.on('connection.update', onConnectionUpdate);
     }
@@ -329,6 +353,8 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
         const isCircuitEnabled = circuitConfig.enabled !== false;
         const maxConsecutiveFailures = circuitConfig.max_consecutive_failures || 3;
         let consecutiveFailures = 0;
+        const humanCfg = getHumanConfig(config);
+        const pacer = createPacer(config);
 
         for (let i = 0; i < targetBatch.length; i++) {
           const lead = targetBatch[i];
@@ -359,6 +385,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
 
           // Step B: Pre-Send Registration Verification via sock.onWhatsApp()
           try {
+            await lookupGap(config);
             console.log(`Checking WhatsApp registration for ${phoneClean.jid}...`);
             const onWaResult = await sock.onWhatsApp(phoneClean.jid);
             const isRegistered = Array.isArray(onWaResult) && onWaResult.length > 0 && onWaResult[0].exists;
@@ -387,26 +414,13 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
               enableZeroWidth: zeroWidthEnabled
             });
 
-            // Step C: Human Typing Simulation
-            if (isTypingEnabled) {
-              try {
-                await sock.presenceSubscribe(targetJid);
-                await sock.sendPresenceUpdate('composing', targetJid);
-                const rawMs = Math.round(proposalText.length * msPerChar);
-                const typingMs = Math.min(Math.max(rawMs, minTypingSec * 1000), maxTypingSec * 1000);
-                console.log(`[Safety] Simulating typing presence for ${(typingMs / 1000).toFixed(1)}s...`);
-                await new Promise((r) => setTimeout(r, typingMs));
-                await sock.sendPresenceUpdate('paused', targetJid);
-              } catch (_) {}
-            }
-
-            // Step D: Send Proposal Text First
+            // Steps C+D: open chat, think, type (bursts), send the proposal text
             console.log(`Sending proposal text to ${targetJid}...`);
-            await sock.sendMessage(targetJid, { text: proposalText });
+            await humanSendText(sock, targetJid, proposalText, config);
             console.log(`  ✓ Proposal text delivered.`);
 
-            // Short human pause between text and video attachment (1.5 - 2.5s)
-            await new Promise((r) => setTimeout(r, 2000));
+            // Human pause between the text and the video attachment
+            await betweenMessagesPause(config);
 
             // Step E: Send Demo Video (if video file is populated)
             if (demoVideoBuffer.length > 0) {
@@ -429,6 +443,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
               processed_at: new Date().toISOString()
             });
             summary.sent++;
+            recordSent(config, 1);
             consecutiveFailures = 0; // Reset circuit breaker counter on success
 
             // Immediate real-time persistence
@@ -439,16 +454,8 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
               });
             }
 
-            // Step F: Human Rest Break (Batch Breaks) or Gaussian Delay
-            if (isBatchBreakEnabled && summary.sent > 0 && summary.sent % breakInterval === 0 && i < targetBatch.length - 1) {
-              const restSec = Math.floor(Math.random() * (maxRestSec - minRestSec + 1)) + minRestSec;
-              console.log(`\n\x1b[36m[HUMAN REST BREAK] Sent ${summary.sent} messages. Taking a ${restSec}s rest break to mimic real human behavior...\x1b[0m`);
-              await new Promise((r) => setTimeout(r, restSec * 1000));
-            } else if (i < targetBatch.length - 1) {
-              console.log(`Applying Gaussian anti-ban delay...`);
-              const delayWaited = await delayGaussian(minDelay, maxDelay);
-              console.log(`Waited ${(delayWaited / 1000).toFixed(1)}s. Moving to next lead...`);
-            }
+            // Step F: linger in chat, go offline, hold (safety.lead_hold) / rest break / distraction
+            await pacer.afterLead({ sock, jid: targetJid, isLast: i >= targetBatch.length - 1 });
           } catch (err) {
             console.error(`\x1b[31m[ERROR] Failed dispatch for ${lead.phone}:\x1b[0m`, err.message);
             leadRecords.push({
@@ -460,6 +467,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
             });
             summary.failed++;
             consecutiveFailures++;
+            const riskSignal = humanCfg.limits.abort_on_risk_signals && isRiskSignal(err);
 
             if (leadsFilePath) {
               updateLeadInYamlFile(leadsFilePath, lead, {
@@ -470,6 +478,11 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
             }
 
             // Circuit Breaker Check
+            if (riskSignal) {
+              console.error('\n\x1b[41m\x1b[37m[RISK SIGNAL]\x1b[0m WhatsApp answered with a rate-limit / blocked style error. Stopping now: wait several hours before sending again.');
+              summary.circuitBreakerTripped = true;
+              break;
+            }
             if (isCircuitEnabled && consecutiveFailures >= maxConsecutiveFailures) {
               console.error(`\n\x1b[41m\x1b[37m[CIRCUIT BREAKER TRIPPED]\x1b[0m ${consecutiveFailures} consecutive dispatches failed! Halting workflow immediately to protect account.`);
               summary.circuitBreakerTripped = true;

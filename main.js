@@ -22,6 +22,7 @@ import { runWhatsAppWorkflow } from './workflows/whatsapp/index.js';
 import { logoutWhatsApp } from './workflows/whatsapp/logout.js';
 import { runWhatsAppScan } from './workflows/whatsapp/scan.js';
 import { getSessionInfo } from './workflows/whatsapp/session.js';
+import { runWhatsAppFollowup, parseFollowupArgs, promptYesNo } from './workflows/whatsapp/followup.js';
 import { runMailWorkflow } from './workflows/mail/index.js';
 import { runScraperWorkflow } from './workflows/scraper/index.js';
 
@@ -103,6 +104,16 @@ function printHelp() {
   \x1b[32m/whatsapp logout\x1b[0m
       Remove the saved WhatsApp session (creds) from this machine.
       - Then use /whatsapp scan to link an account again.
+
+  \x1b[32m/followup\x1b[0m "message" [-w] [file.yaml] [--limit N] [--dry-run] [--yes]
+      Send a follow-up/reminder text to leads you already contacted (status: sent).
+      - Default source: leads/whatsapp/archives/ (finished lead files). Or pass a file.
+      - Placeholders: {restaurant name}, {Hi|Hello} spintax. Use \\n for a new line.
+      - Shows a preview + asks y/N before sending (skip with --yes). --dry-run only previews.
+      - Same safety as /whatsapp. The same message is never sent twice to one lead.
+      - Examples:
+          /followup "Assalam u Alaikum, kya aap ne hamara proposal dekha?" -w
+          /followup "Reminder: demo available hai" -w numbers_archived_2026-10-30T10-00-00.yaml
 
   \x1b[32m/mail\x1b[0m [limit] [file.yaml] [--dry-run]
       Launch Gmail outreach via Nodemailer (SMTP).
@@ -209,7 +220,7 @@ function printStatus(config) {
  * Tab-completion function for readline
  */
 function completer(line) {
-  const completions = ['/whatsapp', '/whatsapp scan', '/whatsapp logout', '/mail', '/scrape', '/status', '/help', '/clear', '/exit'];
+  const completions = ['/whatsapp', '/whatsapp scan', '/whatsapp logout', '/followup', '/mail', '/scrape', '/status', '/help', '/clear', '/exit'];
   const hits = completions.filter((c) => c.startsWith(line.trim()));
   return [hits.length ? hits : completions, line];
 }
@@ -246,6 +257,11 @@ async function runCli() {
           let leads = loadLeadsYaml(targetFile, 'whatsapp');
           if (isDryRun) console.log('\x1b[33m[Mode: Dry-Run / Preview]\x1b[0m');
           await runWhatsAppWorkflow({ leads, config, leadsFilePath: targetFile, dryRun: isDryRun, limit });
+          break;
+        }
+        case '/followup': {
+          const fu = parseFollowupArgs(cliArgs.slice(1));
+          await runWhatsAppFollowup({ ...fu, config, confirm: (q) => promptYesNo(q) });
           break;
         }
         case '/mail': {
@@ -338,6 +354,13 @@ async function runCli() {
             dryRun: isDryRun,
             limit
           });
+          break;
+        }
+
+        case '/followup': {
+          config = loadConfig();
+          const fu = parseFollowupArgs(rawInput.slice(cmd.length));
+          await runWhatsAppFollowup({ ...fu, config, confirm: (q) => promptYesNo(q, rl) });
           break;
         }
 
