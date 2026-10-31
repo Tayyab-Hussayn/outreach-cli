@@ -5,7 +5,7 @@ rate_limits:
     min_delay_seconds: 12
     max_delay_seconds: 28
     batch_size: 15
-    daily_limit: 50
+    daily_limit: 80
   mail:
     min_delay_seconds: 5
     max_delay_seconds: 15
@@ -57,7 +57,7 @@ safety:
     active_hours:
       enabled: true
       start: "09:00"             # Only message during these local hours
-      end: "21:00"
+      end: "23:00"
     abort_on_risk_signals: true  # Stop immediately on rate-limit / forbidden / blocked style errors
 
 smtp:
