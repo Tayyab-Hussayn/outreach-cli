@@ -22,6 +22,7 @@ import {
 
 import { resolveAuthDir, invalidateSession, writeSessionMeta } from './session.js';
 import { getMessage, attachRetryStore, muteSignalNoise } from './retry-store.js';
+import { createDeliveryTracker } from './delivery.js';
 muteSignalNoise();
 
 const MAX_RECONNECTS = 5;
@@ -48,6 +49,7 @@ export async function connectWhatsApp(config = {}) {
       loggedOut: false,
       failed: false,
       closed: false,
+      delivery: createDeliveryTracker(),
       close() {
         handle.closed = true;
         handle.connected = false;
@@ -128,6 +130,7 @@ export async function connectWhatsApp(config = {}) {
         getMessage
       });
       attachRetryStore(handle.sock);
+      handle.delivery.attach(handle.sock);
       handle.sock.ev.on('creds.update', saveCreds);
       handle.sock.ev.on('connection.update', onUpdate);
     }

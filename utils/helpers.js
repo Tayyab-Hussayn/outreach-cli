@@ -446,6 +446,9 @@ export function saveAndPrintReport(workflowType, summaryData, leadRecords = []) 
   }
   console.log(`  ⚠ Invalid Contact     : \x1b[33m${reportPayload.summary.invalid_format}\x1b[0m`);
   console.log(`  ✗ Failed / Errors     : \x1b[31m${reportPayload.summary.failed}\x1b[0m`);
+  if (summaryData.unconfirmed) {
+    console.log(`  ? No Receipt Yet      : \x1b[33m${summaryData.unconfirmed}\x1b[0m (accepted by WhatsApp, delivery not confirmed)`);
+  }
   if (summaryData.circuitBreakerTripped) {
     console.log(`  \x1b[41m\x1b[37m[CIRCUIT BREAKER]\x1b[0m Run halted early to protect your account.`);
   }

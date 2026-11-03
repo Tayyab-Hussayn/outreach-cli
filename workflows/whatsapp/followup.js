@@ -288,7 +288,7 @@ export async function runWhatsAppFollowup(opts = {}) {
   const circuitOn = circuit.enabled !== false;
   const maxFails = circuit.max_consecutive_failures || 3;
 
-  const summary = { total: batch.length, sent: 0, notOnWhatsApp: 0, failed: 0, circuitBreakerTripped: false, loggedOut: false };
+  const summary = { total: batch.length, sent: 0, notOnWhatsApp: 0, failed: 0, unconfirmed: 0, circuitBreakerTripped: false, loggedOut: false };
   const records = [];
   let consecutiveFailures = 0;
 
@@ -298,6 +298,32 @@ export async function runWhatsAppFollowup(opts = {}) {
     }
     return handle.connected;
   };
+
+  const sentLog = [];
+  // sendMessage() resolving only means WhatsApp's server took the message: wait for receipts
+  // (socket must stay open) before calling anything delivered.
+  async function settleDelivery() {
+    if (!sentLog.length) return;
+    const secs = Number(config.safety?.delivery?.settle_seconds ?? 60);
+    console.log(c.d(`\n[Delivery] Staying connected up to ${secs}s for delivery receipts (${sentLog.length} message(s))...`));
+    await handle.delivery.waitFor(sentLog.map((s) => s.id), secs * 1000);
+    let delivered = 0, unconfirmed = 0, rejected = 0;
+    for (const { lead, leadFile, rec, id } of sentLog) {
+      const st = handle.delivery.stateOf(id);
+      if (st === 'delivered' || st === 'read') { delivered++; updateLeadInYamlFile(leadFile, lead, { followup_delivery: 'delivered' }); }
+      else if (st === 'failed') {
+        rejected++; summary.sent--; summary.failed++; rec.status = 'FAILED';
+        // clear the hash so this follow-up can be sent to the lead again
+        updateLeadInYamlFile(leadFile, lead, { followup_delivery: 'failed', followup_error: 'rejected_by_whatsapp', followup_hash: null });
+        console.log(c.y(`  ! ${lead.phone} (${lead.name || 'Anonymous'}) - rejected`));
+      } else {
+        unconfirmed++; summary.sent--; summary.unconfirmed = (summary.unconfirmed || 0) + 1; rec.status = 'UNCONFIRMED';
+        updateLeadInYamlFile(leadFile, lead, { followup_delivery: 'unconfirmed' });
+        console.log(c.y(`  ! ${lead.phone} (${lead.name || 'Anonymous'}) - no receipt yet`));
+      }
+    }
+    console.log(`[Delivery] ${delivered} delivered | ${unconfirmed} unconfirmed | ${rejected} rejected`);
+  }
 
   try {
     for (let i = 0; i < batch.length; i++) {
@@ -323,13 +349,15 @@ export async function runWhatsAppFollowup(opts = {}) {
         const jid = res[0].jid || phone.jid;
         const text = render(lead);
 
-        await humanSendText(sock, jid, text, config);
+        const sendRes = await humanSendText(sock, jid, text, config);
         const now = new Date().toISOString();
         console.log(c.g(`[SENT] Follow-up delivered to ${lead.phone}`));
         summary.sent++;
         recordSent(config, 1);
         consecutiveFailures = 0;
-        records.push({ phone: lead.phone, name: lead.name || '', jid, status: 'SENT', processed_at: now });
+        const rec = { phone: lead.phone, name: lead.name || '', jid, status: 'SENT', processed_at: now };
+        records.push(rec);
+        if (sendRes?.key?.id) sentLog.push({ lead, leadFile, rec, id: sendRes.key.id });
         updateLeadInYamlFile(leadFile, lead, {
           followup_sent_at: now,
           followup_count: (Number(lead.followup_count) || 0) + 1,
@@ -360,6 +388,7 @@ export async function runWhatsAppFollowup(opts = {}) {
         await new Promise((r) => setTimeout(r, 4000));
       }
     }
+    await settleDelivery();
   } finally {
     handle.close();
   }
@@ -378,7 +407,7 @@ export async function runWhatsAppFollowup(opts = {}) {
     leads: records
   }, { indent: 2, lineWidth: -1 }), 'utf8');
 
-  const remaining = summary.total - (summary.sent + summary.notOnWhatsApp + summary.failed);
+  const remaining = summary.total - (summary.sent + summary.notOnWhatsApp + summary.failed + summary.unconfirmed);
   console.log('\n======================================================');
   console.log('       FOLLOW-UP REPORT [WHATSAPP]');
   console.log('======================================================');
@@ -386,6 +415,7 @@ export async function runWhatsAppFollowup(opts = {}) {
   console.log(`  ✓ Sent              : ${c.g(summary.sent)}`);
   console.log(`  ⚠ Not on WhatsApp   : ${c.y(summary.notOnWhatsApp)}`);
   console.log(`  ✗ Failed            : ${c.r(summary.failed)}`);
+  if (summary.unconfirmed > 0) console.log(`  ? No receipt yet    : ${c.y(summary.unconfirmed)} ${c.d('(accepted by WhatsApp, delivery not confirmed)')}`);
   if (remaining > 0) console.log(`  ⏸ Not attempted     : ${c.y(remaining)} ${c.d('(run the same command again to continue)')}`);
   if (summary.circuitBreakerTripped) console.log(`  ${'\x1b[41m\x1b[37m[CIRCUIT BREAKER]\x1b[0m'} Run halted early.`);
   console.log('------------------------------------------------------');

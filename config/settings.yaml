@@ -32,6 +32,8 @@ safety:
     browser_preset: "macOS"      # Official macOS Desktop Baileys fingerprint
     stealth_connect: true        # markOnlineOnConnect: false (avoids instant bot online flag)
   auto_archive_leads: true       # Move fully processed lead file to archives/ subdirectory
+  delivery:
+    settle_seconds: 60           # After the last lead, stay connected this long for delivery receipts (and retry requests)
   lead_hold:                     # Fixed hold after each lead, then the next lead is targeted
     enabled: true
     seconds: 10                  # 10s after every lead (replaces the random 12-28s delay while enabled)

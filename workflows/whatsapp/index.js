@@ -49,6 +49,7 @@ import {
   updateLeadInYamlFile
 } from '../../utils/helpers.js';
 import { getMessage, attachRetryStore, muteSignalNoise } from './retry-store.js';
+import { createDeliveryTracker } from './delivery.js';
 muteSignalNoise();
 
 /**
@@ -206,14 +207,56 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
     let sock = null;
 
     const leadRecords = [];
+    const delivery = createDeliveryTracker();
+    const sentLog = []; // { lead, record, ids } for every lead we pushed messages to
     const summary = {
       total: targetBatch.length,
       sent: 0,
       notOnWhatsApp: 0,
       invalid: 0,
       failed: 0,
+      unconfirmed: 0,
       circuitBreakerTripped: false
     };
+
+    // A resolved sendMessage() only means WhatsApp's server took the message. Stay connected
+    // after the last lead (receipts and retry requests need a live socket) and only then decide
+    // what each lead really is: delivered, unconfirmed (no receipt yet) or failed (rejected).
+    async function settleDelivery() {
+      if (!sentLog.length) return;
+      const secs = Number(config.safety?.delivery?.settle_seconds ?? 60);
+      const ids = sentLog.flatMap((s) => s.ids);
+      console.log(`\n[Delivery] Staying connected up to ${secs}s for delivery receipts (${ids.length} message(s))...`);
+      await delivery.waitFor(ids, secs * 1000);
+
+      const bad = [];
+      let delivered = 0;
+      let rejected = 0;
+      for (const { lead, record, ids: mids } of sentLog) {
+        const [textState, videoState] = mids.map(delivery.stateOf);
+        const outcome = [textState, videoState].includes('failed')
+          ? 'failed'
+          : (textState === 'delivered' || textState === 'read') ? 'delivered' : 'unconfirmed';
+        const checkedAt = new Date().toISOString();
+        const updates = { delivery: outcome, delivery_checked_at: checkedAt, message_ids: mids };
+        if (outcome === 'delivered') {
+          delivered++;
+        } else if (outcome === 'failed') {
+          summary.sent--; summary.failed++; rejected++;
+          Object.assign(updates, { status: 'failed', error: 'rejected_by_whatsapp' });
+          bad.push(`${lead.phone} (${lead.name || 'Anonymous'}) - rejected`);
+        } else {
+          summary.sent--; summary.unconfirmed++;
+          updates.status = 'unconfirmed';
+          bad.push(`${lead.phone} (${lead.name || 'Anonymous'}) - no receipt yet`);
+        }
+        Object.assign(record, { delivery: outcome, status: updates.status ? updates.status.toUpperCase() : record.status });
+        if (leadsFilePath) updateLeadInYamlFile(leadsFilePath, lead, updates);
+      }
+      console.log(`[Delivery] ${delivered} delivered | ${summary.unconfirmed} unconfirmed | ${rejected} rejected`);
+      for (const line of bad) console.log(`  \x1b[33m! ${line}\x1b[0m`);
+      if (bad.length) console.log('\x1b[2mUnconfirmed = WhatsApp accepted it but no receipt arrived (recipient offline or message stuck). Not counted as sent.\x1b[0m');
+    }
 
     function cleanupAndResolve() {
       if (hasResolved) return;
@@ -272,6 +315,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
       });
 
       attachRetryStore(sock);
+      delivery.attach(sock);
       sock.ev.on('creds.update', saveCreds);
       sock.ev.on('connection.update', onConnectionUpdate);
     }
@@ -416,7 +460,8 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
 
             // Steps C+D: open chat, think, type (bursts), send the proposal text
             console.log(`Sending proposal text to ${targetJid}...`);
-            await humanSendText(sock, targetJid, proposalText, config);
+            const textRes = await humanSendText(sock, targetJid, proposalText, config);
+            let videoRes = null;
             console.log(`  ✓ Proposal text delivered.`);
 
             // Human pause between the text and the video attachment
@@ -425,7 +470,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
             // Step E: Send Demo Video (if video file is populated)
             if (demoVideoBuffer.length > 0) {
               console.log(`Sending demo video (${path.basename(demoVideoPath)}) to ${targetJid}...`);
-              await sock.sendMessage(targetJid, {
+              videoRes = await sock.sendMessage(targetJid, {
                 video: demoVideoBuffer,
                 mimetype: 'video/mp4',
                 caption: 'Quick demo walkthrough 📹'
@@ -443,6 +488,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
               processed_at: new Date().toISOString()
             });
             summary.sent++;
+            sentLog.push({ lead, record: leadRecords[leadRecords.length - 1], ids: [textRes?.key?.id, videoRes?.key?.id].filter(Boolean) });
             recordSent(config, 1);
             consecutiveFailures = 0; // Reset circuit breaker counter on success
 
@@ -495,6 +541,7 @@ export async function runWhatsAppWorkflow({ leads, config, leadsFilePath = null,
         }
 
         console.log('\n[WhatsApp] All leads in batch have been processed.');
+        await settleDelivery();
         cleanupAndResolve();
       }
     };
